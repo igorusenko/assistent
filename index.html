@@ -1,453 +1,92 @@
 <!DOCTYPE html>
 <html lang="ru">
 <head>
-    <meta charset="UTF-8">
-    <title>OpenAI Voice Assistant</title>
-    <meta name="viewport" content="width=device-width">
-    <style>
-        body {
-            margin: 0;
-            padding: 0;
-            background: #0d1117;
-            color: #fff;
-            font-family: Arial, sans-serif;
-            display: flex;
-            flex-direction: column;
-            height: 100vh;
-        }
-
-        #chat {
-            flex: 1;
-            overflow-y: auto;
-            padding: 20px;
-        }
-
-        .msg {
-            margin-bottom: 20px;
-            max-width: 80%;
-            padding: 12px 16px;
-            border-radius: 10px;
-            line-height: 1.4;
-        }
-
-        .user {
-            background: #1f6feb;
-            margin-left: auto;
-        }
-
-        .assistant {
-            background: #30363d;
-            margin-right: auto;
-        }
-
-        .status {
-            background: #161b22;
-            padding: 8px 12px;
-            border-radius: 6px;
-            font-size: 0.9em;
-            color: #8b949e;
-            margin-bottom: 10px;
-        }
-
-        #recordBtn {
-            width: 80px;
-            height: 80px;
-            border-radius: 50%;
-            border: none;
-            background: #ff4757;
-            margin: 20px auto;
-            cursor: pointer;
-            transition: .2s;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            font-size: 1rem;
-            color: white;
-        }
-
-        #recordBtn.recording {
-            background: #2ed573;
-            animation: pulse 1s infinite;
-        }
-
-        #recordBtn:disabled {
-            opacity: 0.5;
-            cursor: not-allowed;
-        }
-
-        @keyframes pulse {
-            0% { transform: scale(1); }
-            50% { transform: scale(1.1); }
-            100% { transform: scale(1); }
-        }
-
-        .loading {
-            display: inline-block;
-            width: 12px;
-            height: 12px;
-            border: 2px solid #8b949e;
-            border-top-color: transparent;
-            border-radius: 50%;
-            animation: spin 0.6s linear infinite;
-        }
-
-        @keyframes spin {
-            to { transform: rotate(360deg); }
-        }
-    </style>
+<meta charset="UTF-8">
+<title>Voice Assistant</title>
+<style>
+body { font-family: sans-serif; display: flex; flex-direction: column; align-items: center; padding: 2rem; background: #f0f2f5; }
+#chat { width: 100%; max-width: 600px; height: 400px; overflow-y: auto; background: white; padding: 1rem; border-radius: 8px; box-shadow: 0 0 10px rgba(0,0,0,0.1); margin-bottom: 1rem; }
+.msg { margin: 0.5rem 0; padding: 0.5rem 1rem; border-radius: 20px; display: inline-block; max-width: 80%; }
+.user { background: #d1e7ff; align-self: flex-end; }
+.assistant { background: #e2ffe2; align-self: flex-start; }
+#recordBtn { padding: 0.5rem 1rem; font-size: 1rem; border-radius: 8px; cursor: pointer; }
+#player { display: none; }
+</style>
 </head>
 <body>
 
 <div id="chat"></div>
-
-<button id="recordBtn">🎤</button>
-
-<audio id="player" preload="auto"></audio>
+<button id="recordBtn">🎤 Нажми и говори</button>
+<audio id="player" autoplay></audio>
 
 <script>
-    // URL streaming сервера (по умолчанию локальный, можно изменить)
-    // Определяем URL сервера в зависимости от протокола
-    let STREAMING_SERVER_URL;
-    if (window.location.protocol === 'file:' || !window.location.hostname) {
-        // Если файл открыт локально (file://) или нет hostname, используем localhost
-        STREAMING_SERVER_URL = 'http://localhost:3000';
-    } else if (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1') {
-        STREAMING_SERVER_URL = 'http://localhost:3000';
-    } else {
-        // В продакшене используем тот же домен
-        STREAMING_SERVER_URL = window.location.origin;
-    }
-    
-    const apiUrl = `${STREAMING_SERVER_URL}/api/voice`;
-    
-    console.log('Server URL:', STREAMING_SERVER_URL);
-    console.log('API URL:', apiUrl);
+const chat = document.getElementById('chat');
+const recBtn = document.getElementById('recordBtn');
+const player = document.getElementById('player');
 
-    let mediaRecorder;
-    let chunks = [];
-    let isProcessing = false;
+let mediaRecorder, chunks = [];
+let isRecording = false;
+let sessionId = localStorage.getItem('sessionId') || crypto.randomUUID();
+localStorage.setItem('sessionId', sessionId);
 
-    const chat = document.getElementById("chat");
-    const recBtn = document.getElementById("recordBtn");
-    const player = document.getElementById("player");
+function addMessage(text, who) {
+    const div = document.createElement('div');
+    div.className = 'msg ' + who;
+    div.textContent = text;
+    chat.appendChild(div);
+    chat.scrollTop = chat.scrollHeight;
+}
 
-    // Генерация sessionId
-    let sessionId = localStorage.getItem('sessionId');
-    if (!sessionId) {
-        sessionId = crypto.randomUUID();
-        localStorage.setItem('sessionId', sessionId);
-    }
+recBtn.onclick = async () => {
+    if (!isRecording) {
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        mediaRecorder = new MediaRecorder(stream, { mimeType: 'audio/webm;codecs=opus' });
+        mediaRecorder.ondataavailable = e => chunks.push(e.data);
+        mediaRecorder.onstop = async () => {
+            const blob = new Blob(chunks, { type: 'audio/webm;codecs=opus' });
+            chunks = [];
+            addMessage('🎤 (voice message)', 'user');
 
-    function addMessage(text, who) {
-        const div = document.createElement("div");
-        div.className = "msg " + who;
-        div.textContent = text;
-        chat.appendChild(div);
-        chat.scrollTop = chat.scrollHeight;
-        return div;
-    }
+            const formData = new FormData();
+            formData.append('file', blob, 'voice.webm');
+            formData.append('sessionId', sessionId);
 
-    function addStatus(text) {
-        const div = document.createElement("div");
-        div.className = "status";
-        div.innerHTML = `<span class="loading"></span> ${text}`;
-        chat.appendChild(div);
-        chat.scrollTop = chat.scrollHeight;
-        return div;
-    }
-
-    // Для отслеживания streaming метрик
-    let streamingMetrics = {
-        requestStartTime: null,
-        firstChunkTime: null,
-        firstAudioTime: null,
-        chunkCount: 0
-    };
-
-    function updateStatus(statusDiv, text) {
-        if (statusDiv) {
-            statusDiv.innerHTML = `<span class="loading"></span> ${text}`;
-        }
-    }
-
-    function removeStatus(statusDiv) {
-        if (statusDiv && statusDiv.parentNode) {
-            statusDiv.parentNode.removeChild(statusDiv);
-        }
-    }
-
-    // Улучшенная функция для streaming воспроизведения аудио
-    // Простой подход: накапливает данные, начинает воспроизведение рано, обновляет только когда безопасно
-    async function playStreamingAudio(response, statusDiv = null) {
-        try {
-            // Проверяем, поддерживает ли ответ streaming
-            if (response.body && response.body.getReader) {
-                const reader = response.body.getReader();
-                const chunks = [];
-                const contentType = response.headers.get('content-type') || 'audio/mpeg';
-                let blobUrl = null;
-                let hasStarted = false;
-                const MIN_CHUNKS_TO_START = 2;
-                const MIN_BYTES_TO_START = 10000; // Увеличено до 10KB для более стабильного воспроизведения
-
-                return new Promise((resolve, reject) => {
-                    // Асинхронная функция для чтения потока
-                    (async () => {
-                        try {
-                            while (true) {
-                                const { done, value } = await reader.read();
-                                
-                                if (done) {
-                                    // Поток завершен
-                                    if (chunks.length === 0) {
-                                        reject(new Error('No audio data received'));
-                                        return;
-                                    }
-                                    
-                                    // Если воспроизведение еще не началось, создаем blob и начинаем
-                                    if (!hasStarted) {
-                                        const finalBlob = new Blob(chunks, { type: contentType });
-                                        blobUrl = URL.createObjectURL(finalBlob);
-                                        player.src = blobUrl;
-                                        
-                                        try {
-                                            await player.play();
-                                            hasStarted = true;
-                                            streamingMetrics.firstAudioTime = Date.now();
-                                        } catch (playError) {
-                                            console.log('Play error:', playError);
-                                        }
-                                    } else {
-                                        // Если уже играет, проверяем нужно ли обновить с полными данными
-                                        // Обновляем только если трек закончился (чтобы не прервать воспроизведение)
-                                        if (player.ended) {
-                                            // Трек закончился, обновляем с полными данными
-                                            const finalBlob = new Blob(chunks, { type: contentType });
-                                            if (blobUrl) {
-                                                URL.revokeObjectURL(blobUrl);
-                                            }
-                                            blobUrl = URL.createObjectURL(finalBlob);
-                                            player.src = blobUrl;
-                                            player.currentTime = 0;
-                                            try {
-                                                await player.play();
-                                            } catch (e) {
-                                                console.log('Play error on update:', e);
-                                            }
-                                        }
-                                        // Если трек еще играет, просто оставляем его играть
-                                        // MP3 не поддерживает progressive download, поэтому обновление src прервет воспроизведение
-                                    }
-                                    
-                                    // Ждем окончания воспроизведения
-                                    player.onended = () => {
-                                        const totalTime = Date.now() - streamingMetrics.requestStartTime;
-                                        console.log(`📊 Streaming Complete:`);
-                                        console.log(`  - Total chunks: ${streamingMetrics.chunkCount}`);
-                                        console.log(`  - Time to first chunk: ${streamingMetrics.firstChunkTime ? streamingMetrics.firstChunkTime - streamingMetrics.requestStartTime : 0}ms`);
-                                        console.log(`  - Time to first audio: ${streamingMetrics.firstAudioTime ? streamingMetrics.firstAudioTime - streamingMetrics.requestStartTime : 0}ms`);
-                                        console.log(`  - Total time: ${totalTime}ms`);
-                                        
-                                        if (blobUrl) {
-                                            URL.revokeObjectURL(blobUrl);
-                                        }
-                                        resolve();
-                                    };
-                                    
-                                    // Если трек уже закончился, сразу резолвим
-                                    if (player.ended) {
-                                        if (blobUrl) {
-                                            URL.revokeObjectURL(blobUrl);
-                                        }
-                                        resolve();
-                                    }
-                                    
-                                    break;
-                                }
-                                
-                                // Добавляем чанк
-                                chunks.push(value);
-                                streamingMetrics.chunkCount++;
-                                
-                                if (!streamingMetrics.firstChunkTime) {
-                                    streamingMetrics.firstChunkTime = Date.now();
-                                    const timeToFirstChunk = streamingMetrics.firstChunkTime - streamingMetrics.requestStartTime;
-                                    console.log(`⏱️ First chunk received in ${timeToFirstChunk}ms`);
-                                    if (statusDiv) {
-                                        updateStatus(statusDiv, `Получен первый чанк (${timeToFirstChunk}ms)`);
-                                    }
-                                }
-                                
-                                // Начинаем воспроизведение как только накопится достаточно данных
-                                if (!hasStarted) {
-                                    const totalBytes = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
-                                    
-                                    if (chunks.length >= MIN_CHUNKS_TO_START && totalBytes >= MIN_BYTES_TO_START) {
-                                        // Создаем blob из накопленных чанков
-                                        const initialBlob = new Blob(chunks, { type: contentType });
-                                        blobUrl = URL.createObjectURL(initialBlob);
-                                        player.src = blobUrl;
-                                        
-                                        // Пытаемся начать воспроизведение
-                                        try {
-                                            await player.play();
-                                            hasStarted = true;
-                                            streamingMetrics.firstAudioTime = Date.now();
-                                            const timeToFirstAudio = streamingMetrics.firstAudioTime - streamingMetrics.requestStartTime;
-                                            console.log(`🎵 Streaming playback started! Time to first audio: ${timeToFirstAudio}ms`);
-                                            console.log(`📊 Received ${streamingMetrics.chunkCount} chunks before playback`);
-                                            if (statusDiv) {
-                                                updateStatus(statusDiv, `🎵 Воспроизведение началось (${timeToFirstAudio}ms)`);
-                                            }
-                                        } catch (playError) {
-                                            console.log('Auto-play prevented, will retry when more data arrives:', playError);
-                                            // Продолжаем накапливать данные
-                                        }
-                                    }
-                                }
-                            }
-                        } catch (error) {
-                            console.error('Streaming read error:', error);
-                            if (blobUrl) {
-                                URL.revokeObjectURL(blobUrl);
-                            }
-                            reject(error);
-                        }
-                    })();
-                });
-            } else {
-                // Fallback: обычное воспроизведение
-                const arrayBuf = await response.arrayBuffer();
-                const audioBlob = new Blob([arrayBuf], { type: "audio/mpeg" });
-                const url = URL.createObjectURL(audioBlob);
-                player.src = url;
-                await player.play();
-                
-                return new Promise((resolve) => {
-                    player.onended = () => {
-                        URL.revokeObjectURL(url);
-                        resolve();
-                    };
-                });
-            }
-        } catch (error) {
-            console.error('Error playing audio:', error);
-            throw error;
-        }
-    }
-
-    recBtn.onclick = async () => {
-        if (isProcessing) {
-            return; // Предотвращаем множественные запросы
-        }
-
-        if (!mediaRecorder || mediaRecorder.state === "inactive") {
-            // Start recording
             try {
-                const stream = await navigator.mediaDevices.getUserMedia({ 
-                    audio: {
-                        echoCancellation: true,
-                        noiseSuppression: true,
-                        autoGainControl: true,
-                        sampleRate: 16000 // ОПТИМИЗАЦИЯ 3: Меньший sample rate = меньше данных
-                    } 
+                const resp = await fetch('http://localhost:3000/api/voice', {
+                    method: 'POST', body: formData
                 });
-                
-                mediaRecorder = new MediaRecorder(stream, {
-                    mimeType: 'audio/webm;codecs=opus', // ОПТИМИЗАЦИЯ: Используем Opus кодек
-                    audioBitsPerSecond: 16000 // Низкий битрейт для быстрой передачи
-                });
+                if (!resp.ok) throw new Error(resp.statusText);
 
-                mediaRecorder.ondataavailable = e => {
-                    if (e.data.size > 0) {
-                        chunks.push(e.data);
+                const reader = resp.body.getReader();
+                const audioChunks = [];
+                const streamUrl = URL.createObjectURL(new Blob([], { type: 'audio/mpeg' }));
+                player.src = streamUrl;
+
+                // Streaming audio
+                (async () => {
+                    let done, value;
+                    while ({done, value} = await reader.read(), !done) {
+                        audioChunks.push(value);
+                        const blob = new Blob(audioChunks, { type: 'audio/mpeg' });
+                        const url = URL.createObjectURL(blob);
+                        player.src = url;
+                        await player.play().catch(()=>{});
                     }
-                };
+                })();
 
-                mediaRecorder.onstop = async () => {
-                    isProcessing = true;
-                    recBtn.disabled = true;
-                    
-                    const blob = new Blob(chunks, { type: "audio/webm;codecs=opus" });
-                    chunks = [];
-
-                    addMessage("🎤 (voice message)", "user");
-                    const statusDiv = addStatus("Обработка запроса...");
-
-                    const formData = new FormData();
-                    formData.append("file", blob, "voice.webm");
-                    formData.append("sessionId", sessionId);
-
-                    try {
-                        // Используем AbortController для таймаутов
-                        const controller = new AbortController();
-                        const timeoutId = setTimeout(() => controller.abort(), 60000); // 60 сек таймаут для streaming
-
-                        updateStatus(statusDiv, "Распознавание речи...");
-                        
-                        console.log('Sending request to:', apiUrl);
-                        const resp = await fetch(apiUrl, {
-                            method: "POST",
-                            body: formData,
-                            signal: controller.signal,
-                            headers: {
-                                'Accept': 'audio/mpeg, application/octet-stream',
-                                'X-Session-Id': sessionId
-                            }
-                        });
-                        console.log('Response status:', resp.status, 'Content-Type:', resp.headers.get('content-type'));
-
-                        clearTimeout(timeoutId);
-
-                        if (!resp.ok) {
-                            throw new Error(`HTTP error! status: ${resp.status}`);
-                        }
-
-                        updateStatus(statusDiv, "Генерация ответа...");
-                        
-                        // Начинаем streaming воспроизведение
-                        streamingMetrics.requestStartTime = Date.now();
-                        streamingMetrics.chunkCount = 0;
-                        await playStreamingAudio(resp, statusDiv);
-                        
-                        removeStatus(statusDiv);
-                        addMessage("🔊 (assistant is speaking)", "assistant");
-
-                    } catch (error) {
-                        removeStatus(statusDiv);
-                        if (error.name === 'AbortError') {
-                            addMessage("⏱️ Превышено время ожидания ответа", "assistant");
-                        } else {
-                            addMessage(`❌ Ошибка: ${error.message}`, "assistant");
-                        }
-                        console.error('Error:', error);
-                    } finally {
-                        isProcessing = false;
-                        recBtn.disabled = false;
-                        
-                        // Остановка всех треков для освобождения ресурсов
-                        stream.getTracks().forEach(track => track.stop());
-                    }
-                };
-
-                mediaRecorder.start();
-                recBtn.classList.add("recording");
-                recBtn.textContent = "⏹️";
-
-            } catch (error) {
-                console.error('Error accessing microphone:', error);
-                addMessage("❌ Ошибка доступа к микрофону", "assistant");
+            } catch (err) {
+                addMessage('❌ Ошибка: ' + err.message, 'assistant');
             }
-
-        } else {
-            // Stop recording
-            if (mediaRecorder.state !== "inactive") {
-                mediaRecorder.stop();
-                recBtn.classList.remove("recording");
-                recBtn.textContent = "🎤";
-            }
-        }
-    };
+        };
+        mediaRecorder.start();
+        isRecording = true;
+        recBtn.textContent = '⏹️ Стоп';
+    } else {
+        mediaRecorder.stop();
+        isRecording = false;
+        recBtn.textContent = '🎤 Нажми и говори';
+    }
+};
 </script>
 
 </body>
