@@ -101,11 +101,11 @@ async function processVoiceRequestStreaming(audioBuffer, sessionId, res) {
         console.log(`[${new Date().toISOString()}] 🚀 Starting GPT streaming...`);
         
         const stream = await openai.chat.completions.create({
-            model: 'gpt-3.5-turbo',
+            model: 'gpt-4o-mini', // Более быстрая модель
             messages: messages,
             stream: true,
             temperature: 0.7,
-            max_tokens: 200
+            max_tokens: 150 // Уменьшено для более быстрых ответов
         });
 
         // Собираем текст по частям и сразу отправляем на TTS
@@ -113,13 +113,14 @@ async function processVoiceRequestStreaming(audioBuffer, sessionId, res) {
         let fullText = '';
         let chunkCount = 0;
         let firstChunkTime = null;
-        const MIN_CHARS_FOR_TTS = 20; // Минимум символов перед отправкой на TTS
-        const MAX_WAIT_CHARS = 100; // Максимум символов перед принудительной отправкой
+        const MIN_CHARS_FOR_TTS = 8; // Уменьшено для более быстрого старта TTS
+        const MAX_WAIT_CHARS = 30; // Уменьшено для принудительной отправки
         
         // Очередь для последовательной отправки TTS чанков
         let ttsQueue = Promise.resolve();
         let ttsChunkCount = 0;
         let firstTtsSentTime = null;
+        let isFirstTtsChunk = true; // Флаг для первого чанка
 
         for await (const chunk of stream) {
             const content = chunk.choices[0]?.delta?.content || '';
@@ -136,15 +137,25 @@ async function processVoiceRequestStreaming(audioBuffer, sessionId, res) {
             fullText += content;
 
             // Проверяем, можно ли отправить на TTS
-            const hasSentenceEnd = /[.!?]\s*$/.test(accumulatedText);
+            // Более агрессивная логика: отправляем при любом знаке препинания или при достижении лимита
+            const hasPunctuation = /[.!?,;:]\s*$/.test(accumulatedText);
             const isLongEnough = accumulatedText.length >= MIN_CHARS_FOR_TTS;
             const isTooLong = accumulatedText.length >= MAX_WAIT_CHARS;
+            
+            // Для первого чанка: отправляем еще быстрее (меньше символов или сразу при знаке препинания)
+            const firstChunkThreshold = isFirstTtsChunk ? 6 : MIN_CHARS_FOR_TTS;
+            const shouldSendFirstChunk = isFirstTtsChunk && (accumulatedText.length >= firstChunkThreshold || hasPunctuation);
 
-            if ((hasSentenceEnd && isLongEnough) || isTooLong) {
+            // Отправляем быстрее: при знаке препинания + минимум символов, или при превышении лимита, или для первого чанка
+            if (shouldSendFirstChunk || (hasPunctuation && isLongEnough) || isTooLong) {
                 // Отправляем накопленный текст на TTS
                 const textToTTS = accumulatedText.trim();
                 if (textToTTS) {
                     accumulatedText = ''; // Сбрасываем накопленный текст
+                    const isFirst = isFirstTtsChunk;
+                    if (isFirstTtsChunk) {
+                        isFirstTtsChunk = false; // Сбрасываем флаг после первого чанка
+                    }
                     
                     // Добавляем в очередь для последовательной отправки
                     ttsQueue = ttsQueue.then(async () => {
@@ -167,7 +178,7 @@ async function processVoiceRequestStreaming(audioBuffer, sessionId, res) {
                             if (!firstTtsSentTime) {
                                 firstTtsSentTime = Date.now();
                                 const totalTime = firstTtsSentTime - gptStartTime;
-                                console.log(`[${new Date().toISOString()}] 🎵 FIRST AUDIO CHUNK SENT! Total time: ${totalTime}ms`);
+                                console.log(`[${new Date().toISOString()}] 🎵 FIRST AUDIO CHUNK SENT! Total time: ${totalTime}ms (${isFirst ? 'FIRST CHUNK OPTIMIZATION' : 'normal'})`);
                             }
                             
                             console.log(`[${new Date().toISOString()}] ✅ [TTS #${ttsChunkCount}] Generated ${audioChunk.length} bytes in ${ttsDuration}ms`);

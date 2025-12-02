@@ -177,7 +177,7 @@
     }
 
     // Улучшенная функция для streaming воспроизведения аудио
-    // Использует progressive download для MP3 (совместимо со всеми браузерами)
+    // Простой подход: накапливает данные, начинает воспроизведение рано, обновляет только когда безопасно
     async function playStreamingAudio(response, statusDiv = null) {
         try {
             // Проверяем, поддерживает ли ответ streaming
@@ -187,8 +187,8 @@
                 const contentType = response.headers.get('content-type') || 'audio/mpeg';
                 let blobUrl = null;
                 let hasStarted = false;
-                const MIN_CHUNKS_TO_START = 2; // Минимальное количество чанков для начала
-                const MIN_BYTES_TO_START = 15000; // Минимальный размер в байтах (~15KB для быстрого старта)
+                const MIN_CHUNKS_TO_START = 2;
+                const MIN_BYTES_TO_START = 10000; // Увеличено до 10KB для более стабильного воспроизведения
 
                 return new Promise((resolve, reject) => {
                     // Асинхронная функция для чтения потока
@@ -204,33 +204,39 @@
                                         return;
                                     }
                                     
-                                    // Создаем финальный blob
-                                    const finalBlob = new Blob(chunks, { type: contentType });
-                                    
-                                    // Если еще не начали воспроизведение, начинаем сейчас
+                                    // Если воспроизведение еще не началось, создаем blob и начинаем
                                     if (!hasStarted) {
+                                        const finalBlob = new Blob(chunks, { type: contentType });
                                         blobUrl = URL.createObjectURL(finalBlob);
                                         player.src = blobUrl;
-                                        await player.play();
-                                    } else {
-                                        // Обновляем источник с полными данными
-                                        if (blobUrl) {
-                                            URL.revokeObjectURL(blobUrl);
-                                        }
-                                        blobUrl = URL.createObjectURL(finalBlob);
                                         
-                                        // Если трек еще играет, обновляем источник
-                                        if (!player.ended && player.paused === false) {
-                                            const wasPlaying = !player.paused;
-                                            const currentTime = player.currentTime;
-                                            player.src = blobUrl;
-                                            if (wasPlaying) {
-                                                player.currentTime = currentTime;
-                                                await player.play();
-                                            }
-                                        } else {
-                                            player.src = blobUrl;
+                                        try {
+                                            await player.play();
+                                            hasStarted = true;
+                                            streamingMetrics.firstAudioTime = Date.now();
+                                        } catch (playError) {
+                                            console.log('Play error:', playError);
                                         }
+                                    } else {
+                                        // Если уже играет, проверяем нужно ли обновить с полными данными
+                                        // Обновляем только если трек закончился (чтобы не прервать воспроизведение)
+                                        if (player.ended) {
+                                            // Трек закончился, обновляем с полными данными
+                                            const finalBlob = new Blob(chunks, { type: contentType });
+                                            if (blobUrl) {
+                                                URL.revokeObjectURL(blobUrl);
+                                            }
+                                            blobUrl = URL.createObjectURL(finalBlob);
+                                            player.src = blobUrl;
+                                            player.currentTime = 0;
+                                            try {
+                                                await player.play();
+                                            } catch (e) {
+                                                console.log('Play error on update:', e);
+                                            }
+                                        }
+                                        // Если трек еще играет, просто оставляем его играть
+                                        // MP3 не поддерживает progressive download, поэтому обновление src прервет воспроизведение
                                     }
                                     
                                     // Ждем окончания воспроизведения
