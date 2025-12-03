@@ -115,16 +115,128 @@
         const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
         STREAMING_SERVER_URL = `${wsProtocol}//${window.location.host}/realtime`;
     }
-
+    
     console.log('WS URL:', STREAMING_SERVER_URL);
 
-    let mediaRecorder; // больше не используется, но пусть останется для совместимости
+    let mediaRecorder;
     let ws;
     let isRecording = false;
     let audioContext = null;
     let audioSource = null;
     let audioProcessor = null;
     let micStream = null;
+
+    // === PLAYBACK FOR REALTIME PCM AUDIO ===
+    let playbackContext = null;
+    let audioQueue = [];
+    let isPlaying = false;
+    let playbackTime = 0; // Время, на которое запланировано воспроизведение следующего чанка
+
+    function initPlaybackContext() {
+        if (!playbackContext || playbackContext.state === 'closed') {
+            playbackContext = new AudioContext({ sampleRate: 24000 });
+        }
+        if (playbackContext.state === 'suspended') {
+            playbackContext.resume();
+        }
+    }
+
+    function enqueueAudioChunk(pcm16buffer) {
+        // Проверяем, что данные валидны для PCM16 (длина должна быть кратна 2 байтам)
+        if (!pcm16buffer || pcm16buffer.byteLength === 0) {
+            console.warn('Empty or invalid audio chunk received');
+            return;
+        }
+
+        if (pcm16buffer.byteLength % 2 !== 0) {
+            console.warn('Audio chunk length is not multiple of 2, skipping:', pcm16buffer.byteLength);
+            return;
+        }
+
+        // Минимальная проверка: должны быть хотя бы несколько сэмплов
+        if (pcm16buffer.byteLength < 100) {
+            console.warn('Audio chunk too small, skipping:', pcm16buffer.byteLength);
+            return;
+        }
+
+        initPlaybackContext();
+        audioQueue.push(pcm16buffer);
+        if (!isPlaying) {
+            playbackTime = playbackContext.currentTime;
+            playNextChunk();
+        }
+    }
+
+    function playNextChunk() {
+        if (audioQueue.length === 0) {
+            isPlaying = false;
+            return;
+        }
+        isPlaying = true;
+
+        const chunk = audioQueue.shift();
+        
+        // Дополнительная проверка перед созданием Int16Array
+        if (chunk.byteLength % 2 !== 0) {
+            console.warn('Skipping invalid chunk in playNextChunk:', chunk.byteLength);
+            playNextChunk(); // Пропускаем этот чанк и переходим к следующему
+            return;
+        }
+
+        // Читаем PCM16 данные
+        const dataView = new DataView(chunk);
+        const sampleCount = chunk.byteLength / 2;
+        const float32 = new Float32Array(sampleCount);
+
+        // Конвертация Int16 в Float32
+        // Пробуем little-endian (стандарт для PCM16)
+        let maxValue = 0;
+        let minValue = 0;
+        
+        for (let i = 0; i < sampleCount; i++) {
+            // Читаем Int16 с little-endian порядком байтов
+            const int16Value = dataView.getInt16(i * 2, true);
+            
+            // Нормализуем в диапазон [-1.0, 1.0]
+            float32[i] = int16Value / 32768.0;
+            
+            // Отслеживаем диапазон значений для диагностики
+            if (int16Value > maxValue) maxValue = int16Value;
+            if (int16Value < minValue) minValue = int16Value;
+            
+            // Ограничиваем значения
+            if (float32[i] > 1.0) float32[i] = 1.0;
+            if (float32[i] < -1.0) float32[i] = -1.0;
+        }
+        
+        // Логируем первые несколько сэмплов для диагностики (только для первых чанков)
+        if (audioQueue.length === 0 && sampleCount > 0) {
+            console.log('Audio chunk stats:', {
+                samples: sampleCount,
+                duration: (sampleCount / 24000).toFixed(3) + 's',
+                int16Range: `[${minValue}, ${maxValue}]`,
+                firstSamples: Array.from(float32.slice(0, 5)).map(v => v.toFixed(4))
+            });
+        }
+
+        const buffer = playbackContext.createBuffer(1, float32.length, 24000);
+        buffer.copyToChannel(float32, 0);
+
+        const source = playbackContext.createBufferSource();
+        source.buffer = buffer;
+        source.connect(playbackContext.destination);
+
+        // Вычисляем длительность чанка в секундах
+        const duration = buffer.duration;
+        
+        // Запускаем воспроизведение в нужное время для плавной склейки
+        source.start(playbackTime);
+        
+        // Обновляем время для следующего чанка
+        playbackTime += duration;
+
+        source.onended = () => playNextChunk();
+    }
 
     const chat = document.getElementById("chat");
     const recBtn = document.getElementById("recordBtn");
@@ -176,36 +288,44 @@
         };
 
         ws.onmessage = (event) => {
-            // Обрабатываем только текстовые события Realtime API и показываем текст/транскрипт
+            if (event.data instanceof ArrayBuffer) {
+                enqueueAudioChunk(event.data);
+                return;
+            }
+
+            // Обрабатываем только текстовые события Realtime API и показываем текст
             if (typeof event.data === 'string') {
                 try {
                     const msg = JSON.parse(event.data);
                     console.log('WS EVENT FROM OPENAI:', msg);
 
-                    // Упрощённое событие от сервера с готовым текстом ассистента
+                    // При начале нового ответа очищаем очередь аудио
+                    if (msg.type === 'response.created') {
+                        audioQueue = [];
+                        isPlaying = false;
+                        playbackTime = 0;
+                        if (playbackContext) {
+                            playbackContext.close().catch(() => {});
+                            playbackContext = null;
+                        }
+                        console.log('New response started, cleared audio queue');
+                    }
+
+                    // Упрощённое событие от сервера с готовым текстом
                     if (msg.type === 'assistant.text' && msg.text) {
                         addMessage(msg.text, "assistant");
                         return;
                     }
-
-                    // Текстовый вывод (если модель вернёт text-содержимое)
+                                    
                     if (msg.type === 'response.output_text.delta' && msg.delta) {
                         console.log('TEXT DELTA:', msg.delta);
                     }
 
-                    if (msg.type === 'response.output_text.done' && msg.output) {
-                        const out = msg.output[0];
-                        if (out && Array.isArray(out.content) && out.content[0]?.text) {
-                            const finalText = out.content[0].text;
-                            addMessage(finalText, "assistant");
-                        }
+                    if (msg.type === 'response.output_text.done' && msg.output && msg.output[0]?.content?.[0]?.text) {
+                        const finalText = msg.output[0].content[0].text;
+                        addMessage(finalText, "assistant");
                     }
-
-                    // Если пришло событие об ошибке — покажем в чате
-                    if (msg.type && msg.type.includes('error')) {
-                        addMessage(`❌ Ошибка Realtime: ${JSON.stringify(msg)}`, "assistant");
-                    }
-                } catch (e) {
+                                            } catch (e) {
                     console.warn('Non-JSON text message', event.data);
                 }
             }
@@ -214,10 +334,9 @@
         return ws;
     }
 
-    // Преобразование Float32 [-1,1] в Int16 PCM, с примитивным даун-семплингом до 24кГц при необходимости
+    // Преобразование Float32 [-1,1] в Int16 PCM, с простым даун-семплингом 48k -> 24k при необходимости
     function floatTo16BitPCM(input, originalSampleRate) {
         let data = input;
-        // Простой даун-семплинг с 48000 до 24000 Гц: берём каждый второй сэмпл
         if (originalSampleRate === 48000) {
             const newLength = Math.floor(input.length / 2);
             const down = new Float32Array(newLength);
@@ -232,7 +351,7 @@
         let offset = 0;
         for (let i = 0; i < data.length; i++, offset += 2) {
             let s = Math.max(-1, Math.min(1, data[i]));
-            view.setInt16(offset, s < 0 ? s * 0x8000 : s * 0x7FFF, true); // little-endian
+            view.setInt16(offset, s < 0 ? s * 0x8000 : s * 0x7FFF, true);
         }
         return buffer;
     }
@@ -246,7 +365,6 @@
             recBtn.classList.remove("recording");
             recBtn.textContent = "🎤";
 
-            // Отключаем аудио-пайплайн
             if (audioProcessor && audioSource) {
                 audioSource.disconnect(audioProcessor);
                 audioProcessor.disconnect(audioContext.destination);
@@ -263,11 +381,11 @@
             return;
         }
 
-        try {
-            const stream = await navigator.mediaDevices.getUserMedia({
-                audio: {
-                    echoCancellation: true,
-                    noiseSuppression: true,
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({ 
+                    audio: {
+                        echoCancellation: true,
+                        noiseSuppression: true,
                     autoGainControl: true
                 }
             });
@@ -297,12 +415,12 @@
             addMessage("🎤 (voice started)", "user");
 
             isRecording = true;
-            recBtn.classList.add("recording");
-            recBtn.textContent = "⏹️";
+                recBtn.classList.add("recording");
+                recBtn.textContent = "⏹️";
 
-        } catch (error) {
-            console.error('Error accessing microphone:', error);
-            addMessage("❌ Ошибка доступа к микрофону", "assistant");
+            } catch (error) {
+                console.error('Error accessing microphone:', error);
+                addMessage("❌ Ошибка доступа к микрофону", "assistant");
         }
     };
 </script>
