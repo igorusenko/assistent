@@ -105,27 +105,26 @@
 <audio id="player" preload="auto"></audio>
 
 <script>
-    // URL streaming сервера (по умолчанию локальный, можно изменить)
-    // Определяем URL сервера в зависимости от протокола
+    // URL WS-сервера (по умолчанию локальный, можно изменить)
     let STREAMING_SERVER_URL;
     if (window.location.protocol === 'file:' || !window.location.hostname) {
-        // Если файл открыт локально (file://) или нет hostname, используем localhost
-        STREAMING_SERVER_URL = 'http://localhost:3000';
+        STREAMING_SERVER_URL = 'ws://localhost:3000/realtime';
     } else if (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1') {
-        STREAMING_SERVER_URL = 'http://localhost:3000';
+        STREAMING_SERVER_URL = `ws://${window.location.hostname}:3000/realtime`;
     } else {
-        // В продакшене используем тот же домен
-        STREAMING_SERVER_URL = window.location.origin;
+        const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        STREAMING_SERVER_URL = `${wsProtocol}//${window.location.host}/realtime`;
     }
-    
-    const apiUrl = `${STREAMING_SERVER_URL}/api/voice`;
-    
-    console.log('Server URL:', STREAMING_SERVER_URL);
-    console.log('API URL:', apiUrl);
 
-    let mediaRecorder;
-    let chunks = [];
-    let isProcessing = false;
+    console.log('WS URL:', STREAMING_SERVER_URL);
+
+    let mediaRecorder; // больше не используется, но пусть останется для совместимости
+    let ws;
+    let isRecording = false;
+    let audioContext = null;
+    let audioSource = null;
+    let audioProcessor = null;
+    let micStream = null;
 
     const chat = document.getElementById("chat");
     const recBtn = document.getElementById("recordBtn");
@@ -156,296 +155,154 @@
         return div;
     }
 
-    // Для отслеживания streaming метрик
-    let streamingMetrics = {
-        requestStartTime: null,
-        firstChunkTime: null,
-        firstAudioTime: null,
-        chunkCount: 0
-    };
+    // Простая работа с WS-соединением
+    function ensureWebSocket() {
+        if (ws && ws.readyState === WebSocket.OPEN) return ws;
 
-    function updateStatus(statusDiv, text) {
-        if (statusDiv) {
-            statusDiv.innerHTML = `<span class="loading"></span> ${text}`;
-        }
-    }
+        ws = new WebSocket(STREAMING_SERVER_URL);
 
-    function removeStatus(statusDiv) {
-        if (statusDiv && statusDiv.parentNode) {
-            statusDiv.parentNode.removeChild(statusDiv);
-        }
-    }
+        ws.binaryType = 'arraybuffer';
 
-    // Улучшенная функция для streaming воспроизведения аудио
-    // Простой подход: накапливает данные, начинает воспроизведение рано, обновляет только когда безопасно
-    async function playStreamingAudio(response, statusDiv = null) {
-        try {
-            // Проверяем, поддерживает ли ответ streaming
-            if (response.body && response.body.getReader) {
-                const reader = response.body.getReader();
-                const chunks = [];
-                const contentType = response.headers.get('content-type') || 'audio/mpeg';
-                let blobUrl = null;
-                let hasStarted = false;
-                const MIN_CHUNKS_TO_START = 2;
-                const MIN_BYTES_TO_START = 10000; // Увеличено до 10KB для более стабильного воспроизведения
+        ws.onopen = () => {
+            console.log('WS connected');
+        };
 
-                return new Promise((resolve, reject) => {
-                    // Асинхронная функция для чтения потока
-                    (async () => {
-                        try {
-                            while (true) {
-                                const { done, value } = await reader.read();
-                                
-                                if (done) {
-                                    // Поток завершен
-                                    if (chunks.length === 0) {
-                                        reject(new Error('No audio data received'));
-                                        return;
-                                    }
-                                    
-                                    // Если воспроизведение еще не началось, создаем blob и начинаем
-                                    if (!hasStarted) {
-                                        const finalBlob = new Blob(chunks, { type: contentType });
-                                        blobUrl = URL.createObjectURL(finalBlob);
-                                        player.src = blobUrl;
-                                        
-                                        try {
-                                            await player.play();
-                                            hasStarted = true;
-                                            streamingMetrics.firstAudioTime = Date.now();
-                                        } catch (playError) {
-                                            console.log('Play error:', playError);
-                                        }
-                                    } else {
-                                        // Если уже играет, проверяем нужно ли обновить с полными данными
-                                        // Обновляем только если трек закончился (чтобы не прервать воспроизведение)
-                                        if (player.ended) {
-                                            // Трек закончился, обновляем с полными данными
-                                            const finalBlob = new Blob(chunks, { type: contentType });
-                                            if (blobUrl) {
-                                                URL.revokeObjectURL(blobUrl);
-                                            }
-                                            blobUrl = URL.createObjectURL(finalBlob);
-                                            player.src = blobUrl;
-                                            player.currentTime = 0;
-                                            try {
-                                                await player.play();
-                                            } catch (e) {
-                                                console.log('Play error on update:', e);
-                                            }
-                                        }
-                                        // Если трек еще играет, просто оставляем его играть
-                                        // MP3 не поддерживает progressive download, поэтому обновление src прервет воспроизведение
-                                    }
-                                    
-                                    // Ждем окончания воспроизведения
-                                    player.onended = () => {
-                                        const totalTime = Date.now() - streamingMetrics.requestStartTime;
-                                        console.log(`📊 Streaming Complete:`);
-                                        console.log(`  - Total chunks: ${streamingMetrics.chunkCount}`);
-                                        console.log(`  - Time to first chunk: ${streamingMetrics.firstChunkTime ? streamingMetrics.firstChunkTime - streamingMetrics.requestStartTime : 0}ms`);
-                                        console.log(`  - Time to first audio: ${streamingMetrics.firstAudioTime ? streamingMetrics.firstAudioTime - streamingMetrics.requestStartTime : 0}ms`);
-                                        console.log(`  - Total time: ${totalTime}ms`);
-                                        
-                                        if (blobUrl) {
-                                            URL.revokeObjectURL(blobUrl);
-                                        }
-                                        resolve();
-                                    };
-                                    
-                                    // Если трек уже закончился, сразу резолвим
-                                    if (player.ended) {
-                                        if (blobUrl) {
-                                            URL.revokeObjectURL(blobUrl);
-                                        }
-                                        resolve();
-                                    }
-                                    
-                                    break;
-                                }
-                                
-                                // Добавляем чанк
-                                chunks.push(value);
-                                streamingMetrics.chunkCount++;
-                                
-                                if (!streamingMetrics.firstChunkTime) {
-                                    streamingMetrics.firstChunkTime = Date.now();
-                                    const timeToFirstChunk = streamingMetrics.firstChunkTime - streamingMetrics.requestStartTime;
-                                    console.log(`⏱️ First chunk received in ${timeToFirstChunk}ms`);
-                                    if (statusDiv) {
-                                        updateStatus(statusDiv, `Получен первый чанк (${timeToFirstChunk}ms)`);
-                                    }
-                                }
-                                
-                                // Начинаем воспроизведение как только накопится достаточно данных
-                                if (!hasStarted) {
-                                    const totalBytes = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
-                                    
-                                    if (chunks.length >= MIN_CHUNKS_TO_START && totalBytes >= MIN_BYTES_TO_START) {
-                                        // Создаем blob из накопленных чанков
-                                        const initialBlob = new Blob(chunks, { type: contentType });
-                                        blobUrl = URL.createObjectURL(initialBlob);
-                                        player.src = blobUrl;
-                                        
-                                        // Пытаемся начать воспроизведение
-                                        try {
-                                            await player.play();
-                                            hasStarted = true;
-                                            streamingMetrics.firstAudioTime = Date.now();
-                                            const timeToFirstAudio = streamingMetrics.firstAudioTime - streamingMetrics.requestStartTime;
-                                            console.log(`🎵 Streaming playback started! Time to first audio: ${timeToFirstAudio}ms`);
-                                            console.log(`📊 Received ${streamingMetrics.chunkCount} chunks before playback`);
-                                            if (statusDiv) {
-                                                updateStatus(statusDiv, `🎵 Воспроизведение началось (${timeToFirstAudio}ms)`);
-                                            }
-                                        } catch (playError) {
-                                            console.log('Auto-play prevented, will retry when more data arrives:', playError);
-                                            // Продолжаем накапливать данные
-                                        }
-                                    }
-                                }
-                            }
-                        } catch (error) {
-                            console.error('Streaming read error:', error);
-                            if (blobUrl) {
-                                URL.revokeObjectURL(blobUrl);
-                            }
-                            reject(error);
+        ws.onclose = () => {
+            console.log('WS closed');
+        };
+
+        ws.onerror = (e) => {
+            console.error('WS error', e);
+        };
+
+        ws.onmessage = (event) => {
+            // Обрабатываем только текстовые события Realtime API и показываем текст/транскрипт
+            if (typeof event.data === 'string') {
+                try {
+                    const msg = JSON.parse(event.data);
+                    console.log('WS EVENT FROM OPENAI:', msg);
+
+                    // Упрощённое событие от сервера с готовым текстом ассистента
+                    if (msg.type === 'assistant.text' && msg.text) {
+                        addMessage(msg.text, "assistant");
+                        return;
+                    }
+
+                    // Текстовый вывод (если модель вернёт text-содержимое)
+                    if (msg.type === 'response.output_text.delta' && msg.delta) {
+                        console.log('TEXT DELTA:', msg.delta);
+                    }
+
+                    if (msg.type === 'response.output_text.done' && msg.output) {
+                        const out = msg.output[0];
+                        if (out && Array.isArray(out.content) && out.content[0]?.text) {
+                            const finalText = out.content[0].text;
+                            addMessage(finalText, "assistant");
                         }
-                    })();
-                });
-            } else {
-                // Fallback: обычное воспроизведение
-                const arrayBuf = await response.arrayBuffer();
-                const audioBlob = new Blob([arrayBuf], { type: "audio/mpeg" });
-                const url = URL.createObjectURL(audioBlob);
-                player.src = url;
-                await player.play();
-                
-                return new Promise((resolve) => {
-                    player.onended = () => {
-                        URL.revokeObjectURL(url);
-                        resolve();
-                    };
-                });
+                    }
+
+                    // Если пришло событие об ошибке — покажем в чате
+                    if (msg.type && msg.type.includes('error')) {
+                        addMessage(`❌ Ошибка Realtime: ${JSON.stringify(msg)}`, "assistant");
+                    }
+                } catch (e) {
+                    console.warn('Non-JSON text message', event.data);
+                }
             }
-        } catch (error) {
-            console.error('Error playing audio:', error);
-            throw error;
+        };
+
+        return ws;
+    }
+
+    // Преобразование Float32 [-1,1] в Int16 PCM, с примитивным даун-семплингом до 24кГц при необходимости
+    function floatTo16BitPCM(input, originalSampleRate) {
+        let data = input;
+        // Простой даун-семплинг с 48000 до 24000 Гц: берём каждый второй сэмпл
+        if (originalSampleRate === 48000) {
+            const newLength = Math.floor(input.length / 2);
+            const down = new Float32Array(newLength);
+            for (let i = 0, j = 0; j < newLength; i += 2, j++) {
+                down[j] = input[i];
+            }
+            data = down;
         }
+
+        const buffer = new ArrayBuffer(data.length * 2);
+        const view = new DataView(buffer);
+        let offset = 0;
+        for (let i = 0; i < data.length; i++, offset += 2) {
+            let s = Math.max(-1, Math.min(1, data[i]));
+            view.setInt16(offset, s < 0 ? s * 0x8000 : s * 0x7FFF, true); // little-endian
+        }
+        return buffer;
     }
 
     recBtn.onclick = async () => {
-        if (isProcessing) {
-            return; // Предотвращаем множественные запросы
+        const wsConn = ensureWebSocket();
+
+        if (isRecording) {
+            // Стоп записи
+            isRecording = false;
+            recBtn.classList.remove("recording");
+            recBtn.textContent = "🎤";
+
+            // Отключаем аудио-пайплайн
+            if (audioProcessor && audioSource) {
+                audioSource.disconnect(audioProcessor);
+                audioProcessor.disconnect(audioContext.destination);
+            }
+            if (micStream) {
+                micStream.getTracks().forEach(t => t.stop());
+            }
+
+            // Сообщаем Realtime API, что аудиобуфер закончен и нужно сгенерировать ответ
+            if (wsConn.readyState === WebSocket.OPEN) {
+                wsConn.send(JSON.stringify({ type: 'input_audio_buffer.commit' }));
+                wsConn.send(JSON.stringify({ type: 'response.create' }));
+            }
+            return;
         }
 
-        if (!mediaRecorder || mediaRecorder.state === "inactive") {
-            // Start recording
-            try {
-                const stream = await navigator.mediaDevices.getUserMedia({ 
-                    audio: {
-                        echoCancellation: true,
-                        noiseSuppression: true,
-                        autoGainControl: true,
-                        sampleRate: 16000 // ОПТИМИЗАЦИЯ 3: Меньший sample rate = меньше данных
-                    } 
-                });
-                
-                mediaRecorder = new MediaRecorder(stream, {
-                    mimeType: 'audio/webm;codecs=opus', // ОПТИМИЗАЦИЯ: Используем Opus кодек
-                    audioBitsPerSecond: 16000 // Низкий битрейт для быстрой передачи
-                });
+        try {
+            const stream = await navigator.mediaDevices.getUserMedia({
+                audio: {
+                    echoCancellation: true,
+                    noiseSuppression: true,
+                    autoGainControl: true
+                }
+            });
 
-                mediaRecorder.ondataavailable = e => {
-                    if (e.data.size > 0) {
-                        chunks.push(e.data);
-                    }
-                };
+            micStream = stream;
 
-                mediaRecorder.onstop = async () => {
-                    isProcessing = true;
-                    recBtn.disabled = true;
-                    
-                    const blob = new Blob(chunks, { type: "audio/webm;codecs=opus" });
-                    chunks = [];
-
-                    addMessage("🎤 (voice message)", "user");
-                    const statusDiv = addStatus("Обработка запроса...");
-
-                    const formData = new FormData();
-                    formData.append("file", blob, "voice.webm");
-                    formData.append("sessionId", sessionId);
-
-                    try {
-                        // Используем AbortController для таймаутов
-                        const controller = new AbortController();
-                        const timeoutId = setTimeout(() => controller.abort(), 60000); // 60 сек таймаут для streaming
-
-                        updateStatus(statusDiv, "Распознавание речи...");
-                        
-                        console.log('Sending request to:', apiUrl);
-                        const resp = await fetch(apiUrl, {
-                            method: "POST",
-                            body: formData,
-                            signal: controller.signal,
-                            headers: {
-                                'Accept': 'audio/mpeg, application/octet-stream',
-                                'X-Session-Id': sessionId
-                            }
-                        });
-                        console.log('Response status:', resp.status, 'Content-Type:', resp.headers.get('content-type'));
-
-                        clearTimeout(timeoutId);
-
-                        if (!resp.ok) {
-                            throw new Error(`HTTP error! status: ${resp.status}`);
-                        }
-
-                        updateStatus(statusDiv, "Генерация ответа...");
-                        
-                        // Начинаем streaming воспроизведение
-                        streamingMetrics.requestStartTime = Date.now();
-                        streamingMetrics.chunkCount = 0;
-                        await playStreamingAudio(resp, statusDiv);
-                        
-                        removeStatus(statusDiv);
-                        addMessage("🔊 (assistant is speaking)", "assistant");
-
-                    } catch (error) {
-                        removeStatus(statusDiv);
-                        if (error.name === 'AbortError') {
-                            addMessage("⏱️ Превышено время ожидания ответа", "assistant");
-                        } else {
-                            addMessage(`❌ Ошибка: ${error.message}`, "assistant");
-                        }
-                        console.error('Error:', error);
-                    } finally {
-                        isProcessing = false;
-                        recBtn.disabled = false;
-                        
-                        // Остановка всех треков для освобождения ресурсов
-                        stream.getTracks().forEach(track => track.stop());
-                    }
-                };
-
-                mediaRecorder.start();
-                recBtn.classList.add("recording");
-                recBtn.textContent = "⏹️";
-
-            } catch (error) {
-                console.error('Error accessing microphone:', error);
-                addMessage("❌ Ошибка доступа к микрофону", "assistant");
+            if (!audioContext) {
+                audioContext = new (window.AudioContext || window.webkitAudioContext)();
             }
 
-        } else {
-            // Stop recording
-            if (mediaRecorder.state !== "inactive") {
-                mediaRecorder.stop();
-                recBtn.classList.remove("recording");
-                recBtn.textContent = "🎤";
-            }
+            const source = audioContext.createMediaStreamSource(stream);
+            const processor = audioContext.createScriptProcessor(4096, 1, 1);
+
+            processor.onaudioprocess = function (e) {
+                if (!isRecording || wsConn.readyState !== WebSocket.OPEN) return;
+                const inputBuffer = e.inputBuffer.getChannelData(0);
+                const pcmBuffer = floatTo16BitPCM(inputBuffer, audioContext.sampleRate);
+                wsConn.send(pcmBuffer);
+            };
+
+            source.connect(processor);
+            processor.connect(audioContext.destination);
+
+            audioSource = source;
+            audioProcessor = processor;
+
+            addMessage("🎤 (voice started)", "user");
+
+            isRecording = true;
+            recBtn.classList.add("recording");
+            recBtn.textContent = "⏹️";
+
+        } catch (error) {
+            console.error('Error accessing microphone:', error);
+            addMessage("❌ Ошибка доступа к микрофону", "assistant");
         }
     };
 </script>
