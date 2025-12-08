@@ -5,6 +5,7 @@ const http = require('http');
 const WebSocket = require('ws');
 const OpenAI = require('openai');
 const cors = require('cors');
+const { mapToolsToDefinitions } = require('./tools/index');
 
 const app = express();
 const server = http.createServer(app);
@@ -32,6 +33,84 @@ app.use(cors({
 
 app.options('*', cors());
 app.use(express.json());
+
+// Глобальная конфигурация автоматизации (загружается один раз при старте)
+let automationConfig = null;
+const N8N_CONFIG_WEBHOOK_URL = 'https://dev-115-n8n.aitency.net/webhook/config';
+
+/**
+ * Получает конфигурацию автоматизации из n8n webhook
+ * @param {string} automationId - ID автоматизации
+ * @returns {Promise<Object|null>} Конфигурация или null при ошибке
+ */
+async function fetchAutomationConfig(automationId) {
+    if (!automationId) {
+        console.log('[Config] No AUTOMATION_ID provided, using default config');
+        return null;
+    }
+
+    try {
+        const url = `${N8N_CONFIG_WEBHOOK_URL}?automationId=${encodeURIComponent(automationId)}`;
+        console.log(`[Config] 🔄 Fetching config from n8n: ${url}`);
+        
+        const response = await fetch(url, {
+            method: 'GET',
+            headers: {
+                'Accept': 'application/json'
+            }
+        });
+
+        if (!response.ok) {
+            throw new Error(`n8n webhook returned ${response.status}: ${response.statusText}`);
+        }
+
+        const config = await response.json();
+        console.log(`[Config] ✅ Received config:`, JSON.stringify(config, null, 2));
+        
+        return config;
+    } catch (error) {
+        console.error(`[Config] ❌ Error fetching config:`, error.message);
+        return null;
+    }
+}
+
+/**
+ * Построить конфигурацию сессии Realtime API из конфигурации n8n
+ * @param {Object} config - Конфигурация из n8n
+ * @returns {Object} Конфигурация сессии для session.update
+ */
+function buildSessionConfig(config) {
+    const defaultConfig = {
+        instructions: 'Ты голосовой ассистент и всегда отвечаешь по-русски, кратко и дружелюбно.',
+        input_audio_format: 'pcm16',
+        output_audio_format: 'pcm16',
+        voice: 'echo',
+        turn_detection: { type: 'server_vad' }
+    };
+
+    if (!config) {
+        return defaultConfig;
+    }
+
+    const sessionConfig = {
+        input_audio_format: 'pcm16',
+        output_audio_format: 'pcm16',
+        turn_detection: { type: 'server_vad' },
+        instructions: config.systemPrompt || defaultConfig.instructions,
+        voice: config.voice || defaultConfig.voice
+    };
+
+    // Маппим инструменты из конфига в определения Realtime API
+    if (config.tools && Array.isArray(config.tools) && config.tools.length > 0) {
+        const toolDefinitions = mapToolsToDefinitions(config.tools);
+        if (toolDefinitions.length > 0) {
+            sessionConfig.tools = toolDefinitions;
+            console.log(`[Config] Mapped ${toolDefinitions.length} tools to Realtime API`);
+        }
+    }
+
+    return sessionConfig;
+}
 
 // Health check endpoint
 app.get('/health', (req, res) => {
@@ -62,17 +141,16 @@ wss.on('connection', async (ws, req) => {
 
         openaiWs.on('open', () => {
             console.log(`[${new Date().toISOString()}] ▶️ Connected to OpenAI Realtime`);
-            // Отправляем настройки сессии: русский язык и PCM16-аудио
+            
+            // Используем глобальную конфигурацию (может быть null, если еще загружается)
+            const sessionConfig = buildSessionConfig(automationConfig);
+            
             const sessionUpdate = {
                 type: 'session.update',
-                session: {
-                    instructions: 'Ты голосовой ассистент и всегда отвечаешь по-русски, кратко и дружелюбно.',
-                    input_audio_format: 'pcm16',
-                    output_audio_format: 'pcm16',
-                    voice: 'echo',
-                    turn_detection: { type: 'server_vad' }
-                }
+                session: sessionConfig
             };
+            
+            console.log(`[Config] Using ${automationConfig ? 'automation' : 'default'} config for session`);
             openaiWs.send(JSON.stringify(sessionUpdate));
         });
 
@@ -240,7 +318,7 @@ wss.on('connection', async (ws, req) => {
     });
 });
 
-// Запуск HTTP+WS сервера
+// Запуск HTTP+WS сервера (сразу, без ожидания конфигурации)
 server.listen(PORT, () => {
     console.log(`🚀 OpenAI Realtime Voice Server running on port ${PORT}`);
     console.log(`🔊 WebSocket endpoint: ws://localhost:${PORT}/realtime`);
@@ -249,3 +327,20 @@ server.listen(PORT, () => {
         console.log(`⚠️  WARNING: Set OPENAI_API_KEY environment variable!`);
     }
 });
+
+// Загрузка конфигурации параллельно (не блокирует старт сервера)
+(async () => {
+    const automationId = process.env.AUTOMATION_ID;
+    
+    if (automationId) {
+        console.log(`[Config] Loading automation config for: ${automationId}`);
+        automationConfig = await fetchAutomationConfig(automationId);
+        if (automationConfig) {
+            console.log(`✅ Automation config loaded successfully`);
+        } else {
+            console.log(`⚠️  Failed to load automation config, using default`);
+        }
+    } else {
+        console.log('[Config] AUTOMATION_ID not set, using default configuration');
+    }
+})();

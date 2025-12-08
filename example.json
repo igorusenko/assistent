@@ -1,0 +1,194 @@
+{
+  "name": "FAQ Search for Voice Assistant (1.107.4)",
+  "nodes": [
+    {
+      "id": "Webhook",
+      "name": "Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [260, 320],
+      "parameters": {
+        "path": "voice-faq",
+        "httpMethod": "POST",
+        "responseMode": "lastNode",
+        "options": {}
+      }
+    },
+    {
+      "id": "Switch",
+      "name": "Select FAQ by automationId",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 1,
+      "position": [520, 320],
+      "parameters": {
+        "propertyName": "={{$json[\"automationId\"]}}",
+        "rules": [
+          {
+            "operation": "equal",
+            "value": "7"
+          },
+          {
+            "operation": "equal",
+            "value": "12"
+          }
+        ],
+        "options": {}
+      }
+    },
+    {
+      "id": "Set_FAQ7",
+      "name": "FAQ for automationId = 7",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3,
+      "position": [800, 180],
+      "parameters": {
+        "keepOnlySet": true,
+        "values": {
+          "json": {
+            "faq": [
+              {
+                "question": "как оформить страховку",
+                "answer": "Чтобы оформить страховку, зайдите в личный кабинет."
+              },
+              {
+                "question": "как продлить страховку",
+                "answer": "Продление находится в разделе 'Мои полисы'."
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": "Set_FAQ12",
+      "name": "FAQ for automationId = 12",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3,
+      "position": [800, 460],
+      "parameters": {
+        "keepOnlySet": true,
+        "values": {
+          "json": {
+            "faq": [
+              {
+                "question": "как создать лид",
+                "answer": "Перейдите в CRM → Leads → Create."
+              },
+              {
+                "question": "как сменить статус",
+                "answer": "Откройте лид и выберите новый статус."
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": "Merge",
+      "name": "Merge FAQ + User Question",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 1,
+      "position": [1080, 320],
+      "parameters": {
+        "mode": "passThrough",
+        "options": {}
+      }
+    },
+    {
+      "id": "Find",
+      "name": "Find Best Answer",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [1340, 320],
+      "parameters": {
+        "functionCode": "const userQ = ($json.question || '').toLowerCase();\nconst faq = $json.faq || [];\n\nfor (const item of faq) {\n  if (userQ.includes(item.question.toLowerCase())) {\n    return [{ answer: item.answer }];\n  }\n}\n\nreturn [{ answer: 'К сожалению, я не нашёл подходящего ответа.' }];"
+      }
+    },
+    {
+      "id": "Respond",
+      "name": "Respond",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [1600, 320],
+      "parameters": {
+        "responseBody": "={{ {\"answer\": $json.answer} }}",
+        "options": {}
+      }
+    }
+  ],
+  "connections": {
+    "Webhook": {
+      "main": [
+        [
+          {
+            "node": "Select FAQ by automationId",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Select FAQ by automationId": {
+      "main": [
+        [
+          {
+            "node": "FAQ for automationId = 7",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "FAQ for automationId = 12",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "FAQ for automationId = 7": {
+      "main": [
+        [
+          {
+            "node": "Merge FAQ + User Question",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "FAQ for automationId = 12": {
+      "main": [
+        [
+          {
+            "node": "Merge FAQ + User Question",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Merge FAQ + User Question": {
+      "main": [
+        [
+          {
+            "node": "Find Best Answer",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Find Best Answer": {
+      "main": [
+        [
+          {
+            "node": "Respond",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  }
+}
