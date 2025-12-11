@@ -105,21 +105,28 @@
 <audio id="player" preload="auto"></audio>
 
 <script>
-    // URL WS-сервера (по умолчанию обращаемся к развернутому backend на voice-116)
+    // URL WS-сервера. Быстро переключаемся между локальным и продом.
     const REMOTE_WS_URL = 'wss://voice-116.aitency.net/realtime';
-    const urlOverride = new URLSearchParams(window.location.search).get('ws');
+    const LOCAL_WS_URL = 'ws://localhost:3000/realtime';
+    const params = new URLSearchParams(window.location.search);
+    const urlOverride = params.get('ws');
+    const modeOverride = params.get('backend'); // local | remote
+    const savedMode = localStorage.getItem('backendMode'); // local | remote
 
-    let STREAMING_SERVER_URL;
-    if (urlOverride) {
-        // Позволяет явно задать ws-url через query-параметр ?ws=...
-        STREAMING_SERVER_URL = urlOverride;
-    } else if (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1') {
-        // Локальная разработка — оставляем возможность ходить на локальный сервер
-        STREAMING_SERVER_URL = 'ws://localhost:3000/realtime';
-    } else {
-        // Прод по умолчанию стучится в задеплоенный backend
-        STREAMING_SERVER_URL = REMOTE_WS_URL;
+    function resolveWsUrl() {
+        if (urlOverride) return urlOverride;
+        const mode = modeOverride || savedMode;
+        if (mode === 'local') return LOCAL_WS_URL;
+        if (mode === 'remote') return REMOTE_WS_URL;
+        // Фоллбек: если страница с локального хоста — ходим локально, иначе — на прод
+        if (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1') {
+            return LOCAL_WS_URL;
+        }
+        return REMOTE_WS_URL;
     }
+
+    const STREAMING_SERVER_URL = resolveWsUrl();
+    localStorage.setItem('backendMode', modeOverride || savedMode || (STREAMING_SERVER_URL === LOCAL_WS_URL ? 'local' : 'remote'));
     
     console.log('WS URL:', STREAMING_SERVER_URL);
 
