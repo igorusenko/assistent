@@ -105,15 +105,20 @@
 <audio id="player" preload="auto"></audio>
 
 <script>
-    // URL WS-сервера (по умолчанию локальный, можно изменить)
+    // URL WS-сервера (по умолчанию обращаемся к развернутому backend на voice-116)
+    const REMOTE_WS_URL = 'wss://voice-116.aitency.net/realtime';
+    const urlOverride = new URLSearchParams(window.location.search).get('ws');
+
     let STREAMING_SERVER_URL;
-    if (window.location.protocol === 'file:' || !window.location.hostname) {
-        STREAMING_SERVER_URL = 'ws://localhost:3000/realtime';
+    if (urlOverride) {
+        // Позволяет явно задать ws-url через query-параметр ?ws=...
+        STREAMING_SERVER_URL = urlOverride;
     } else if (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1') {
-        STREAMING_SERVER_URL = `ws://${window.location.hostname}:3000/realtime`;
+        // Локальная разработка — оставляем возможность ходить на локальный сервер
+        STREAMING_SERVER_URL = 'ws://localhost:3000/realtime';
     } else {
-        const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-        STREAMING_SERVER_URL = `${wsProtocol}//${window.location.host}/realtime`;
+        // Прод по умолчанию стучится в задеплоенный backend
+        STREAMING_SERVER_URL = REMOTE_WS_URL;
     }
     
     console.log('WS URL:', STREAMING_SERVER_URL);
