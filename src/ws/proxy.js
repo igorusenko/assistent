@@ -11,7 +11,7 @@ function attachRealtimeProxy({ server, apiKey, getAutomationConfig, buildSession
         let openaiWs;
 
         try {
-            const url = `wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview`;
+            const url = `wss://api.openai.com/v1/realtime?model=gpt-realtime`;
 
             openaiWs = new WebSocket(url, {
                 headers: {
