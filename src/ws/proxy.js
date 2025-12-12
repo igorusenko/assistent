@@ -1,6 +1,6 @@
 const WebSocket = require('ws');
 
-function attachRealtimeProxy({ server, apiKey, getAutomationConfig, buildSessionConfig }) {
+function attachRealtimeProxy({ server, apiKey, getAutomationConfig, buildSessionConfig, waitForAutomationConfig }) {
     const wss = new WebSocket.Server({ server, path: '/realtime' });
 
     // WebSocket для проксирования в OpenAI Realtime API
@@ -11,6 +11,9 @@ function attachRealtimeProxy({ server, apiKey, getAutomationConfig, buildSession
         let openaiWs;
 
         try {
+            // Ждем, пока загрузится конфигурация (или завершится с ошибкой/дефолтом)
+            await waitForAutomationConfig();
+
             const url = `wss://api.openai.com/v1/realtime?model=gpt-realtime`;
 
             openaiWs = new WebSocket(url, {
@@ -20,19 +23,35 @@ function attachRealtimeProxy({ server, apiKey, getAutomationConfig, buildSession
                 }
             });
 
-            openaiWs.on('open', () => {
-                console.log(`[${new Date().toISOString()}] ▶️ Connected to OpenAI Realtime`);
+            // Флаг, что session.created уже получен
+            let sessionCreated = false;
+            
+            // Функция для отправки конфигурации сессии
+            const sendSessionConfig = () => {
+                if (!sessionCreated) {
+                    console.log(`[Config] Waiting for session.created before sending config`);
+                    return;
+                }
                 
-                // Используем глобальную конфигурацию (может быть null, если еще загружается)
-                const sessionConfig = buildSessionConfig(getAutomationConfig());
+                const automationConfig = getAutomationConfig();
+                const sessionConfig = buildSessionConfig(automationConfig);
                 
                 const sessionUpdate = {
                     type: 'session.update',
                     session: sessionConfig
                 };
                 
-                console.log(`[Config] Using ${getAutomationConfig() ? 'automation' : 'default'} config for session`);
-                openaiWs.send(JSON.stringify(sessionUpdate));
+                console.log(`[Config] Using ${automationConfig ? 'automation' : 'default'} config for session`);
+                console.log(`[Config] Session config:`, JSON.stringify(sessionConfig, null, 2));
+                
+                if (openaiWs.readyState === WebSocket.OPEN) {
+                    openaiWs.send(JSON.stringify(sessionUpdate));
+                }
+            };
+
+            openaiWs.on('open', () => {
+                console.log(`[${new Date().toISOString()}] ▶️ Connected to OpenAI Realtime`);
+                // Не отправляем конфигурацию сразу - ждем session.created
             });
 
             openaiWs.on('message', (data) => {
@@ -80,11 +99,33 @@ function attachRealtimeProxy({ server, apiKey, getAutomationConfig, buildSession
                 console.log('[OpenAI EVENT]', asString);
 
                 // Пытаемся вытащить понятный текст-транскрипт и отправить его браузеру
+                let audioDeltaProcessed = false;
                 try {
                     const evt = JSON.parse(asString);
 
-                    // Обработка аудио-чанков (response.audio.delta содержит base64-кодированный PCM16)
-                    if (evt.type === 'response.audio.delta' && evt.delta) {
+                    // Обрабатываем session.created - после этого можно отправлять session.update
+                    if (evt.type === 'session.created') {
+                        sessionCreated = true;
+                        console.log(`[Config] Session created, sending config update`);
+                        // Отправляем конфигурацию после получения session.created
+                        const automationConfig = getAutomationConfig();
+                        const sessionConfig = buildSessionConfig(automationConfig);
+                        
+                        const sessionUpdate = {
+                            type: 'session.update',
+                            session: sessionConfig
+                        };
+                        
+                        console.log(`[Config] Using ${automationConfig ? 'automation' : 'default'} config for session`);
+                        console.log(`[Config] Session config:`, JSON.stringify(sessionConfig, null, 2));
+                        
+                        if (openaiWs.readyState === WebSocket.OPEN) {
+                            openaiWs.send(JSON.stringify(sessionUpdate));
+                        }
+                    }
+
+                    // Обработка аудио-чанков (поддерживаем оба варианта: response.output_audio.delta и response.audio.delta)
+                    if ((evt.type === 'response.output_audio.delta' || evt.type === 'response.audio.delta') && evt.delta) {
                         try {
                             // Декодируем base64 в бинарные данные
                             const audioBuffer = Buffer.from(evt.delta, 'base64');
@@ -92,6 +133,7 @@ function attachRealtimeProxy({ server, apiKey, getAutomationConfig, buildSession
                                 console.log('[OpenAI EVENT] (audio delta decoded)', audioBuffer.length, 'bytes PCM16');
                                 // Отправляем как бинарные данные
                                 ws.send(audioBuffer);
+                                audioDeltaProcessed = true;
                             } else {
                                 console.warn('[OpenAI EVENT] Invalid audio delta length:', audioBuffer.length);
                             }
@@ -102,7 +144,8 @@ function attachRealtimeProxy({ server, apiKey, getAutomationConfig, buildSession
                     
                     // Логируем все аудио-связанные события для отладки
                     if (evt.type && evt.type.includes('audio')) {
-                        console.log('[OpenAI EVENT]', evt.type, evt.type === 'response.audio.delta' ? `(${evt.delta?.length || 0} base64 chars)` : '');
+                        const isDelta = evt.type === 'response.output_audio.delta' || evt.type === 'response.audio.delta';
+                        console.log('[OpenAI EVENT]', evt.type, isDelta ? `(${evt.delta?.length || 0} base64 chars)` : '');
                     }
                     
                     if (evt.type === 'response.created' || evt.type === 'response.done') {
@@ -118,7 +161,7 @@ function attachRealtimeProxy({ server, apiKey, getAutomationConfig, buildSession
                     }
 
                     // 2) Если есть готовая расшифровка аудио ответа
-                    if (evt.type === 'response.audio_transcript.done' && evt.transcript) {
+                    if ((evt.type === 'response.output_audio_transcript.done' || evt.type === 'response.audio_transcript.done') && evt.transcript) {
                         ws.send(JSON.stringify({
                             type: 'assistant.text',
                             text: evt.transcript
@@ -129,7 +172,10 @@ function attachRealtimeProxy({ server, apiKey, getAutomationConfig, buildSession
                 }
 
                 // Отправляем исходное событие в браузер (на случай дополнительной отладки)
-                ws.send(asString);
+                // Пропускаем response.output_audio.delta, так как уже отправили бинарные данные
+                if (!audioDeltaProcessed) {
+                    ws.send(asString);
+                }
             });
 
             openaiWs.on('close', (code, reason) => {

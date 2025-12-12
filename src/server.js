@@ -2,7 +2,7 @@ const http = require('http');
 const { PORT, OPENAI_API_KEY } = require('./config');
 const { createExpressApp } = require('./http/app');
 const { attachRealtimeProxy } = require('./ws/proxy');
-const { loadAutomationConfig, getAutomationConfig, buildSessionConfig } = require('./automation');
+const { loadAutomationConfig, getAutomationConfig, buildSessionConfig, waitForAutomationConfig } = require('./automation');
 
 const app = createExpressApp();
 const server = http.createServer(app);
@@ -11,7 +11,8 @@ attachRealtimeProxy({
     server,
     apiKey: OPENAI_API_KEY,
     getAutomationConfig,
-    buildSessionConfig
+    buildSessionConfig,
+    waitForAutomationConfig
 });
 
 // Запуск HTTP+WS сервера (сразу, без ожидания конфигурации)

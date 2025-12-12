@@ -143,14 +143,37 @@
     let audioQueue = [];
     let isPlaying = false;
     let playbackTime = 0; // Время, на которое запланировано воспроизведение следующего чанка
+    let currentAudioSources = []; // Активные источники аудио для возможности остановки
+    let lastResponseItemId = null; // ID последнего ответа для truncate
+    let playbackStartTime = 0; // Время начала воспроизведения текущего ответа
 
     function initPlaybackContext() {
         if (!playbackContext || playbackContext.state === 'closed') {
             playbackContext = new AudioContext({ sampleRate: 24000 });
+            console.log('AudioContext created, state:', playbackContext.state);
         }
         if (playbackContext.state === 'suspended') {
-            playbackContext.resume();
+            playbackContext.resume().then(() => {
+                console.log('AudioContext resumed, state:', playbackContext.state);
+            }).catch(err => {
+                console.error('Failed to resume AudioContext:', err);
+            });
         }
+    }
+
+    function stopAllPlayback() {
+        // Останавливаем все активные источники аудио
+        currentAudioSources.forEach(source => {
+            try {
+                source.stop();
+            } catch (e) {
+                // Источник уже остановлен
+            }
+        });
+        currentAudioSources = [];
+        audioQueue = [];
+        isPlaying = false;
+        playbackTime = 0;
     }
 
     function enqueueAudioChunk(pcm16buffer) {
@@ -172,7 +195,25 @@
         }
 
         initPlaybackContext();
+        
+        // Убеждаемся, что контекст активен перед добавлением в очередь
+        if (playbackContext.state === 'suspended') {
+            playbackContext.resume().then(() => {
+                console.log('AudioContext resumed before enqueue, state:', playbackContext.state);
+                audioQueue.push(pcm16buffer);
+                console.log('Audio chunk enqueued after resume, queue length:', audioQueue.length, 'isPlaying:', isPlaying);
+                if (!isPlaying) {
+                    playbackTime = playbackContext.currentTime;
+                    playNextChunk();
+                }
+            }).catch(err => {
+                console.error('Failed to resume AudioContext:', err);
+            });
+            return;
+        }
+        
         audioQueue.push(pcm16buffer);
+        console.log('Audio chunk enqueued, queue length:', audioQueue.length, 'isPlaying:', isPlaying, 'context state:', playbackContext.state);
         if (!isPlaying) {
             playbackTime = playbackContext.currentTime;
             playNextChunk();
@@ -182,11 +223,32 @@
     function playNextChunk() {
         if (audioQueue.length === 0) {
             isPlaying = false;
+            console.log('Audio queue empty, stopping playback');
             return;
         }
+        
+        // Проверяем, что контекст активен
+        if (!playbackContext || playbackContext.state === 'closed') {
+            console.error('PlaybackContext is closed, cannot play chunk');
+            audioQueue = [];
+            isPlaying = false;
+            return;
+        }
+        
+        if (playbackContext.state === 'suspended') {
+            playbackContext.resume().then(() => {
+                console.log('AudioContext resumed in playNextChunk');
+                playNextChunk(); // Повторяем попытку после возобновления
+            }).catch(err => {
+                console.error('Failed to resume AudioContext in playNextChunk:', err);
+            });
+            return;
+        }
+        
         isPlaying = true;
 
         const chunk = audioQueue.shift();
+        console.log('Playing chunk, size:', chunk.byteLength, 'remaining in queue:', audioQueue.length);
         
         // Дополнительная проверка перед созданием Int16Array
         if (chunk.byteLength % 2 !== 0) {
@@ -220,6 +282,9 @@
             if (float32[i] > 1.0) float32[i] = 1.0;
             if (float32[i] < -1.0) float32[i] = -1.0;
         }
+
+        // Убрали fade-in/out, так как он делает голос неровным
+        // Вместо этого полагаемся на правильную синхронизацию чанков
         
         // Логируем первые несколько сэмплов для диагностики (только для первых чанков)
         if (audioQueue.length === 0 && sampleCount > 0) {
@@ -238,16 +303,55 @@
         source.buffer = buffer;
         source.connect(playbackContext.destination);
 
+        // Сохраняем источник для возможности остановки при прерывании
+        currentAudioSources.push(source);
+
         // Вычисляем длительность чанка в секундах
         const duration = buffer.duration;
         
-        // Запускаем воспроизведение в нужное время для плавной склейки
-        source.start(playbackTime);
+        // Выравниваем расписание: если отстали от currentTime — начинаем сразу
+        const startAt = Math.max(playbackTime, playbackContext.currentTime);
+        
+        // Запоминаем время начала первого чанка для truncate
+        if (currentAudioSources.length === 1) {
+            playbackStartTime = startAt;
+        }
+        
+        try {
+            source.start(startAt);
+            console.log('Audio source started at:', startAt, 'duration:', duration.toFixed(3), 's');
+        } catch (err) {
+            console.error('Failed to start audio source:', err);
+            // Удаляем источник из списка и продолжаем со следующим чанком
+            const index = currentAudioSources.indexOf(source);
+            if (index > -1) {
+                currentAudioSources.splice(index, 1);
+            }
+            playNextChunk();
+            return;
+        }
         
         // Обновляем время для следующего чанка
-        playbackTime += duration;
+        playbackTime = startAt + duration;
 
-        source.onended = () => playNextChunk();
+        source.onended = () => {
+            console.log('Audio chunk finished playing');
+            // Удаляем источник из списка активных
+            const index = currentAudioSources.indexOf(source);
+            if (index > -1) {
+                currentAudioSources.splice(index, 1);
+            }
+            playNextChunk();
+        };
+        
+        source.onerror = (err) => {
+            console.error('Audio source error:', err);
+            const index = currentAudioSources.indexOf(source);
+            if (index > -1) {
+                currentAudioSources.splice(index, 1);
+            }
+            playNextChunk();
+        };
     }
 
     const chat = document.getElementById("chat");
@@ -301,6 +405,7 @@
 
         ws.onmessage = (event) => {
             if (event.data instanceof ArrayBuffer) {
+                console.log('Received binary audio data:', event.data.byteLength, 'bytes');
                 enqueueAudioChunk(event.data);
                 return;
             }
@@ -313,14 +418,48 @@
 
                     // При начале нового ответа очищаем очередь аудио
                     if (msg.type === 'response.created') {
-                        audioQueue = [];
-                        isPlaying = false;
-                        playbackTime = 0;
-                        if (playbackContext) {
-                            playbackContext.close().catch(() => {});
-                            playbackContext = null;
+                        console.log('Response created, stopping previous playback');
+                        stopAllPlayback();
+                        lastResponseItemId = msg.response?.id || null;
+                        playbackStartTime = 0;
+                        // Инициализируем контекст для нового ответа
+                        initPlaybackContext();
+                        console.log('New response started, cleared audio queue, context state:', playbackContext?.state);
+                    }
+
+                    // Обработка прерывания - пользователь начал говорить во время ответа модели
+                    if (msg.type === 'input_audio_buffer.speech_started') {
+                        console.log('User started speaking, interrupting playback');
+                        stopAllPlayback();
+                        // Отправляем truncate для удаления непроигранного аудио из контекста
+                        if (lastResponseItemId && ws && ws.readyState === WebSocket.OPEN && playbackContext) {
+                            const playedDuration = Math.max(0, (playbackContext.currentTime - playbackStartTime) * 1000);
+                            if (playedDuration > 0) {
+                                ws.send(JSON.stringify({
+                                    type: 'conversation.item.truncate',
+                                    item_id: lastResponseItemId,
+                                    content_index: 0,
+                                    audio_end_ms: Math.floor(playedDuration)
+                                }));
+                                console.log(`Truncated response ${lastResponseItemId} at ${Math.floor(playedDuration)}ms`);
+                            }
                         }
-                        console.log('New response started, cleared audio queue');
+                    }
+
+                    // Обработка отмены ответа
+                    if (msg.type === 'response.cancelled') {
+                        console.log('Response cancelled by server');
+                        stopAllPlayback();
+                    }
+
+                    // Сохраняем ID элемента ответа для возможного truncate
+                    if (msg.type === 'response.output_item.added' && msg.item?.id) {
+                        lastResponseItemId = msg.item.id;
+                    }
+
+                    // Также получаем ID из response.done (на случай, если output_item.added не пришло)
+                    if (msg.type === 'response.done' && msg.response?.output?.[0]?.id) {
+                        lastResponseItemId = msg.response.output[0].id;
                     }
 
                     // Упрощённое событие от сервера с готовым текстом
@@ -370,12 +509,22 @@
 
     recBtn.onclick = async () => {
         const wsConn = ensureWebSocket();
+        
+        // Активируем AudioContext при первом взаимодействии (требование браузеров)
+        initPlaybackContext();
+        if (playbackContext && playbackContext.state === 'suspended') {
+            await playbackContext.resume();
+            console.log('AudioContext activated on user interaction');
+        }
 
         if (isRecording) {
             // Стоп записи
             isRecording = false;
             recBtn.classList.remove("recording");
             recBtn.textContent = "🎤";
+
+            // Останавливаем воспроизведение ответов при остановке записи
+            stopAllPlayback();
 
             if (audioProcessor && audioSource) {
                 audioSource.disconnect(audioProcessor);

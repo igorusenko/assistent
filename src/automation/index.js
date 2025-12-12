@@ -2,6 +2,7 @@ const { N8N_CONFIG_WEBHOOK_URL } = require('../config');
 const { mapToolsToDefinitions } = require('../../tools');
 
 let automationConfig = null;
+let automationConfigPromise = Promise.resolve(null);
 
 /**
  * Получает конфигурацию автоматизации из n8n webhook
@@ -47,10 +48,12 @@ async function fetchAutomationConfig(automationId) {
 function buildSessionConfig(config) {
     const defaultConfig = {
         instructions: 'Ты голосовой ассистент и всегда отвечаешь по-русски, кратко и дружелюбно.',
+        voice: 'alloy',
         input_audio_format: 'pcm16',
         output_audio_format: 'pcm16',
-        voice: 'echo',
-        turn_detection: { type: 'server_vad' }
+        turn_detection: {
+            type: 'semantic_vad'
+        }
     };
 
     if (!config) {
@@ -58,11 +61,13 @@ function buildSessionConfig(config) {
     }
 
     const sessionConfig = {
+        instructions: config.systemPrompt || defaultConfig.instructions,
+        voice: config.voice || defaultConfig.voice,
         input_audio_format: 'pcm16',
         output_audio_format: 'pcm16',
-        turn_detection: { type: 'server_vad' },
-        instructions: config.systemPrompt || defaultConfig.instructions,
-        voice: config.voice || defaultConfig.voice
+        turn_detection: {
+            type: 'semantic_vad'
+        }
     };
 
     // Маппим инструменты из конфига в определения Realtime API
@@ -70,21 +75,49 @@ function buildSessionConfig(config) {
         const toolDefinitions = mapToolsToDefinitions(config.tools);
         if (toolDefinitions.length > 0) {
             sessionConfig.tools = toolDefinitions;
-            console.log(`[Config] Mapped ${toolDefinitions.length} tools to Realtime API`);
+            sessionConfig.tool_choice = config.tool_choice || 'auto';
+            console.log(`[Config] Mapped ${toolDefinitions.length} tools to Realtime API, tool_choice: ${sessionConfig.tool_choice}`);
         }
     }
+
+    console.log(`[Config] Built session config from n8n:`, {
+        hasInstructions: !!sessionConfig.instructions,
+        voice: sessionConfig.voice,
+        toolsCount: sessionConfig.tools ? sessionConfig.tools.length : 0
+    });
 
     return sessionConfig;
 }
 
 async function loadAutomationConfig(automationId) {
-    automationConfig = await fetchAutomationConfig(automationId);
-    if (automationConfig) {
-        console.log(`✅ Automation config loaded successfully`);
-    } else if (automationId) {
-        console.log(`⚠️  Failed to load automation config, using default`);
-    }
-    return automationConfig;
+    // Сохраняем промис, чтобы другие части кода могли ждать загрузку
+    automationConfigPromise = (async () => {
+        try {
+            automationConfig = await fetchAutomationConfig(automationId);
+            if (automationConfig) {
+                console.log(`✅ Automation config loaded successfully`);
+                console.log(`[Config] Config content:`, JSON.stringify(automationConfig, null, 2));
+            } else if (automationId) {
+                console.log(`⚠️  Failed to load automation config, using default`);
+            }
+            return automationConfig;
+        } catch (error) {
+            console.error(`[Config] Error loading automation config:`, error);
+            return null;
+        }
+    })();
+    return automationConfigPromise;
+}
+
+function waitForAutomationConfig() {
+    console.log(`[Config] Waiting for automation config...`);
+    return automationConfigPromise.then(config => {
+        console.log(`[Config] Config wait completed, config:`, config ? 'loaded' : 'default');
+        return config;
+    }).catch(() => {
+        console.log(`[Config] Config wait failed, using default`);
+        return null;
+    });
 }
 
 function getAutomationConfig() {
@@ -95,6 +128,7 @@ module.exports = {
     fetchAutomationConfig,
     buildSessionConfig,
     loadAutomationConfig,
-    getAutomationConfig
+    getAutomationConfig,
+    waitForAutomationConfig
 };
 
