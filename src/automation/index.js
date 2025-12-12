@@ -70,6 +70,17 @@ function buildSessionConfig(config) {
         }
     };
 
+    // Добавляем скорость воспроизведения аудио (от 0.25 до 4.0, по умолчанию 1.0)
+    if (config.speed !== undefined) {
+        const speed = parseFloat(config.speed);
+        if (speed >= 0.25 && speed <= 4.0) {
+            sessionConfig.speed = speed;
+            console.log(`[Config] Audio speed set to: ${speed}`);
+        } else {
+            console.warn(`[Config] Invalid speed value ${speed}, must be between 0.25 and 4.0, using default 1.0`);
+        }
+    }
+
     // Маппим инструменты из конфига в определения Realtime API
     if (config.tools && Array.isArray(config.tools) && config.tools.length > 0) {
         const toolDefinitions = mapToolsToDefinitions(config.tools);
