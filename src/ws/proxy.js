@@ -25,6 +25,8 @@ function attachRealtimeProxy({ server, apiKey, getAutomationConfig, buildSession
 
             // Флаг, что session.created уже получен
             let sessionCreated = false;
+            // Сохраняем sessionId из OpenAI
+            let sessionId = null;
             
             // Функция для отправки конфигурации сессии
             const sendSessionConfig = () => {
@@ -88,15 +90,10 @@ function attachRealtimeProxy({ server, apiKey, getAutomationConfig, buildSession
                     const buffer = Buffer.isBuffer(data) ? data : Buffer.from(data);
                     // Проверяем, что это валидные PCM16 данные (длина кратна 2)
                     if (buffer.length > 0 && buffer.length % 2 === 0) {
-                        console.log('[OpenAI EVENT] (binary PCM16 audio)', buffer.length, 'bytes');
                         ws.send(buffer);
-                    } else {
-                        console.warn('[OpenAI EVENT] Invalid binary data length:', buffer.length);
                     }
                     return;
                 }
-
-                console.log('[OpenAI EVENT]', asString);
 
                 // Пытаемся вытащить понятный текст-транскрипт и отправить его браузеру
                 let audioDeltaProcessed = false;
@@ -106,6 +103,7 @@ function attachRealtimeProxy({ server, apiKey, getAutomationConfig, buildSession
                     // Обрабатываем session.created - после этого можно отправлять session.update
                     if (evt.type === 'session.created') {
                         sessionCreated = true;
+                        sessionId = evt.session?.id || null;
                         console.log(`[Config] Session created, sending config update`);
                         // Отправляем конфигурацию после получения session.created
                         const automationConfig = getAutomationConfig();
@@ -130,26 +128,13 @@ function attachRealtimeProxy({ server, apiKey, getAutomationConfig, buildSession
                             // Декодируем base64 в бинарные данные
                             const audioBuffer = Buffer.from(evt.delta, 'base64');
                             if (audioBuffer.length > 0 && audioBuffer.length % 2 === 0) {
-                                console.log('[OpenAI EVENT] (audio delta decoded)', audioBuffer.length, 'bytes PCM16');
                                 // Отправляем как бинарные данные
                                 ws.send(audioBuffer);
                                 audioDeltaProcessed = true;
-                            } else {
-                                console.warn('[OpenAI EVENT] Invalid audio delta length:', audioBuffer.length);
                             }
                         } catch (e) {
-                            console.error('[OpenAI EVENT] Error decoding audio delta:', e);
+                            // Ошибка декодирования - пропускаем
                         }
-                    }
-                    
-                    // Логируем все аудио-связанные события для отладки
-                    if (evt.type && evt.type.includes('audio')) {
-                        const isDelta = evt.type === 'response.output_audio.delta' || evt.type === 'response.audio.delta';
-                        console.log('[OpenAI EVENT]', evt.type, isDelta ? `(${evt.delta?.length || 0} base64 chars)` : '');
-                    }
-                    
-                    if (evt.type === 'response.created' || evt.type === 'response.done') {
-                        console.log('[OpenAI EVENT]', evt.type);
                     }
 
                     // 1) Если Realtime прислал текстовый вывод
@@ -166,6 +151,19 @@ function attachRealtimeProxy({ server, apiKey, getAutomationConfig, buildSession
                             type: 'assistant.text',
                             text: evt.transcript
                         }));
+                        
+                        // Логируем только response.audio_transcript.done с sessionId
+                        if (evt.type === 'response.audio_transcript.done') {
+                            const logEntry = {
+                                type: 'response.audio_transcript.done',
+                                timestamp: new Date().toISOString(),
+                                sessionId: sessionId || null, // Всегда записываем sessionId (может быть null если еще не получен)
+                                response_id: evt.response_id,
+                                item_id: evt.item_id,
+                                transcript: evt.transcript
+                            };
+                            console.log(JSON.stringify(logEntry));
+                        }
                     }
                 } catch (e) {
                     // не JSON — пропускаем
